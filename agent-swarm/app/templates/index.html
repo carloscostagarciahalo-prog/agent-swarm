@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Panel del enjambre</title>
+<style>
+  :root {
+    --bg: #0d0f14; --panel: #161923; --border: #2a2e3d;
+    --text: #e7e9ee; --muted: #8b8fa3; --accent: #5eead4;
+    --danger: #f87171; --gold: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 24px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 28px; font-weight: 700; margin-top: 6px; }
+  .value.countdown { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .value.total { color: var(--gold); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 14px; font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); }
+  tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
+  tr.row:hover { background: #1c2030; cursor: pointer; }
+  .rank { color: var(--muted); width: 40px; }
+  .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); align-items: center; justify-content: center; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 480px; max-height: 80vh; overflow-y: auto; }
+  .modal h2 { margin-top: 0; }
+  .action { border-left: 2px solid var(--border); padding: 8px 12px; margin-bottom: 8px; font-size: 13px; }
+  .action.approved { border-color: var(--accent); }
+  .action.rejected_hard, .action.rejected_llm, .action.rejected_risk { border-color: var(--danger); }
+  .kill-btn { background: var(--danger); color: #fff; border: none; padding: 8px 14px; border-radius: 8px; cursor: pointer; margin-top: 16px; font-weight: 600; }
+  .close-btn { background: none; color: var(--muted); border: none; float: right; cursor: pointer; font-size: 18px; }
+  .instruction-box { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 24px; }
+  .instruction-box textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-family: inherit; font-size: 13px; resize: vertical; min-height: 60px; box-sizing: border-box; }
+  .instruction-box .row { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+  .btn { background: var(--accent); color: #0d0f14; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; }
+  .btn.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .instruction-status { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>Panel del enjambre de agentes</h1>
+
+  <div class="grid">
+    <div class="card"><div class="label">Próxima selección en</div><div class="value countdown" id="countdown">--:--:--</div></div>
+    <div class="card"><div class="label">Total generado (histórico)</div><div class="value total" id="total-generated">-- €</div></div>
+    <div class="card"><div class="label">Agentes vivos</div><div class="value" id="alive-count">--</div></div>
+  </div>
+
+  <div class="instruction-box">
+    <div class="label" style="color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">
+      Instrucción activa para todo el enjambre
+    </div>
+    <textarea id="instruction-text" placeholder="Ej: prioriza DeFi esta semana, evita el método X, etc. Se aplica a los 100 agentes en su próximo turno."></textarea>
+    <div class="row">
+      <button class="btn" onclick="saveInstruction()">Guardar y aplicar</button>
+      <button class="btn secondary" onclick="clearInstruction()">Quitar instrucción</button>
+      <span class="instruction-status" id="instruction-status"></span>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th class="rank">#</th><th>Agente</th><th>Balance</th></tr></thead>
+    <tbody id="leaderboard-body"></tbody>
+  </table>
+
+  <div class="modal-bg" id="modal-bg">
+    <div class="modal">
+      <button class="close-btn" onclick="closeModal()">✕</button>
+      <h2 id="modal-title">Agente</h2>
+      <div id="modal-body"></div>
+      <button class="kill-btn" onclick="killCurrent()">Kill switch — eliminar este agente</button>
+    </div>
+  </div>
+
+<script>
+const ADMIN_TOKEN = prompt("Token de administrador:");
+let currentAgent = null;
+
+async function api(path) {
+  const res = await fetch(path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(ADMIN_TOKEN));
+  return res.json();
+}
+
+async function refresh() {
+  const board = await fetch('/api/public/leaderboard').then(r => r.json());
+  const tbody = document.getElementById('leaderboard-body');
+  tbody.innerHTML = '';
+  board.forEach((a, i) => {
+    const tr = document.createElement('tr');
+    tr.className = 'row';
+    tr.onclick = () => openAgent(a.number);
+    tr.innerHTML = `<td class="rank">${i+1}</td><td>Agente #${a.number}</td><td>${a.balance.toFixed(2)} €</td>`;
+    tbody.appendChild(tr);
+  });
+  document.getElementById('alive-count').textContent = board.length;
+
+  const totalData = await api('/api/admin/total_generated');
+  document.getElementById('total-generated').textContent = totalData.total.toFixed(2) + ' €';
+}
+
+async function tickCountdown() {
+  const data = await fetch('/api/public/next_selection').then(r => r.json());
+  if (data.seconds_left == null) { document.getElementById('countdown').textContent = '—'; return; }
+  let s = data.seconds_left;
+  const h = String(Math.floor(s/3600)).padStart(2,'0');
+  const m = String(Math.floor((s%3600)/60)).padStart(2,'0');
+  const sec = String(s%60).padStart(2,'0');
+  document.getElementById('countdown').textContent = `${h}:${m}:${sec}`;
+}
+
+async function openAgent(number) {
+  currentAgent = number;
+  const data = await api(`/api/admin/agent/${number}`);
+  document.getElementById('modal-title').textContent = `Agente #${data.number} (gen. ${data.generation})`;
+  let html = `<p>Balance: <strong>${data.balance.toFixed(2)} €</strong> · Padre: ${data.parent_number ?? '—'} · Estado: ${data.alive ? 'vivo' : 'eliminado'}</p>`;
+  html += `<p style="font-size:12px;color:var(--muted);word-break:break-all;">Wallet: ${data.wallet_address ?? '—'}<br>
+    Saldo on-chain: ${data.onchain_balance != null ? data.onchain_balance + ' (moneda nativa de la red configurada)' : 'no disponible ahora mismo'}</p>`;
+  html += `<h3>Actividad reciente (cómo ha ganado / qué está haciendo ahora)</h3>`;
+  data.actions.forEach(a => {
+    html += `<div class="action ${a.status}"><strong>${a.method}</strong> — ${a.description}<br>
+      pidió ${a.amount_requested.toFixed(2)} € → resultado ${a.amount_result.toFixed(2)} € (${a.status})</div>`;
+  });
+  document.getElementById('modal-body').innerHTML = html || '<p>Sin actividad todavía.</p>';
+  document.getElementById('modal-bg').style.display = 'flex';
+}
+
+function closeModal() { document.getElementById('modal-bg').style.display = 'none'; }
+
+async function killCurrent() {
+  if (!currentAgent) return;
+  if (!confirm(`¿Seguro que quieres eliminar al agente #${currentAgent}?`)) return;
+  await fetch('/api/admin/kill?token=' + encodeURIComponent(ADMIN_TOKEN), {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({number: currentAgent, reason: 'manual'})
+  });
+  closeModal();
+  refresh();
+}
+
+async function loadInstruction() {
+  const data = await api('/api/admin/instruction');
+  document.getElementById('instruction-text').value = data.message || '';
+  document.getElementById('instruction-status').textContent = data.message
+    ? 'Activa — se aplica a todos los agentes en su próximo turno.'
+    : 'Sin instrucción activa ahora mismo.';
+}
+
+async function saveInstruction() {
+  const message = document.getElementById('instruction-text').value;
+  await fetch('/api/admin/instruction?token=' + encodeURIComponent(ADMIN_TOKEN), {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message})
+  });
+  document.getElementById('instruction-status').textContent = 'Guardada. Se aplicará en el próximo turno de cada agente.';
+}
+
+async function clearInstruction() {
+  document.getElementById('instruction-text').value = '';
+  await fetch('/api/admin/instruction?token=' + encodeURIComponent(ADMIN_TOKEN), {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: ''})
+  });
+  document.getElementById('instruction-status').textContent = 'Instrucción retirada.';
+}
+
+refresh();
+loadInstruction();
+tickCountdown();
+setInterval(refresh, 15000);
+setInterval(tickCountdown, 1000);
+</script>
+</body>
+</html>

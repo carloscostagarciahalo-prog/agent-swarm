@@ -1,0 +1,9 @@
+flask
+requests
+eth-account
+web3
+gunicorn
+playwright
+composio
+beautifulsoup4
+python-dotenv
